@@ -25,7 +25,7 @@ static ssize_t ngx_udp_shared_recv(ngx_connection_t *c, u_char *buf,
 static ngx_int_t ngx_insert_udp_connection(ngx_connection_t *c);
 static ngx_connection_t *ngx_lookup_udp_connection(ngx_listening_t *ls,
     struct sockaddr *sockaddr, socklen_t socklen,
-    struct sockaddr *local_sockaddr, socklen_t local_socklen);
+    struct sockaddr *local_sockaddr, socklen_t local_socklen, u_char *data);
 
 
 void
@@ -230,7 +230,7 @@ ngx_event_recvmsg(ngx_event_t *ev)
 #endif
 
         c = ngx_lookup_udp_connection(ls, sockaddr, socklen, local_sockaddr,
-                                      local_socklen);
+                                      local_socklen, buffer);
 
         if (c) {
 
@@ -405,6 +405,7 @@ ngx_event_recvmsg(ngx_event_t *ev)
         }
 #endif
 
+        ngx_log_error(NGX_LOG_ALERT, ev->log, 0, "Insert Connections");
         if (ngx_insert_udp_connection(c) != NGX_OK) {
             ngx_close_accepted_udp_connection(c);
             return;
@@ -540,6 +541,14 @@ ngx_insert_udp_connection(ngx_connection_t *c)
 
     ngx_crc32_init(hash);
     ngx_crc32_update(&hash, (u_char *) c->sockaddr, c->socklen);
+    if ((c) &&
+        (c->buffer) &&
+        (c->buffer->start)) {
+	u_char *gtpType = c->buffer->start + 1;
+        ngx_crc32_update(&hash, gtpType, 1);
+	c->gtpcProtoS.len = sprintf(c->gtpcProto, "%d", *gtpType);
+	c->gtpcProtoS.data = (u_char *)c->gtpcProto;
+    }
 
     if (c->listening->wildcard) {
         ngx_crc32_update(&hash, (u_char *) c->local_sockaddr, c->local_socklen);
@@ -582,7 +591,7 @@ ngx_delete_udp_connection(void *data)
 
 static ngx_connection_t *
 ngx_lookup_udp_connection(ngx_listening_t *ls, struct sockaddr *sockaddr,
-    socklen_t socklen, struct sockaddr *local_sockaddr, socklen_t local_socklen)
+    socklen_t socklen, struct sockaddr *local_sockaddr, socklen_t local_socklen, u_char *data)
 {
     uint32_t               hash;
     ngx_int_t              rc;
@@ -611,6 +620,9 @@ ngx_lookup_udp_connection(ngx_listening_t *ls, struct sockaddr *sockaddr,
 
     ngx_crc32_init(hash);
     ngx_crc32_update(&hash, (u_char *) sockaddr, socklen);
+
+    u_char *gtpType = data + 1;
+    ngx_crc32_update(&hash, gtpType, 1);
 
     if (ls->wildcard) {
         ngx_crc32_update(&hash, (u_char *) local_sockaddr, local_socklen);

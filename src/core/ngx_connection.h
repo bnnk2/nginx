@@ -141,9 +141,11 @@ struct ngx_connection_s {
 
     int                 type;
 
+    char               gtpcProto[4];
     struct sockaddr    *sockaddr;
     socklen_t           socklen;
     ngx_str_t           addr_text;
+    ngx_str_t          gtpcProtoS;
 
     ngx_proxy_protocol_t  *proxy_protocol;
 

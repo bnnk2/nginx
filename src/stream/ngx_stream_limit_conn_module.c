@@ -16,9 +16,12 @@
 
 
 typedef struct {
+    ngx_msec_t                      refilledTime;
+    ngx_int_t                       tokens;
     u_char                          color;
     u_char                          len;
     u_short                         conn;
+    u_short                         locked;
     u_char                          data[1];
 } ngx_stream_limit_conn_node_t;
 
@@ -45,6 +48,7 @@ typedef struct {
 typedef struct {
     ngx_shm_zone_t                 *shm_zone;
     ngx_uint_t                      conn;
+    u_char                          gtpcProto;
 } ngx_stream_limit_conn_limit_t;
 
 
@@ -67,6 +71,8 @@ static char *ngx_stream_limit_conn_merge_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static char *ngx_stream_limit_conn_zone(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_stream_limit_conn_gtpc(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static char *ngx_stream_limit_conn(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_stream_limit_conn_add_variables(ngx_conf_t *cf);
@@ -88,6 +94,13 @@ static ngx_command_t  ngx_stream_limit_conn_commands[] = {
       NGX_STREAM_MAIN_CONF|NGX_CONF_TAKE2,
       ngx_stream_limit_conn_zone,
       0,
+      0,
+      NULL },
+
+    { ngx_string("limit_conn_gtpc"),
+      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_TAKE3,
+      ngx_stream_limit_conn_gtpc,
+      NGX_STREAM_SRV_CONF_OFFSET,
       0,
       NULL },
 
@@ -189,11 +202,16 @@ ngx_stream_limit_conn_handler(ngx_stream_session_t *s)
             continue;
         }
 
-        if (key.len > 255) {
+	if (limits[i].gtpcProto != atoi((char *)key.data)) {
+            continue;
+	}
+
+        if (key.len > 255) 
+	{
             ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                           "the value of the \"%V\" key "
-                          "is more than 255 bytes: \"%V\"",
-                          &ctx->key.value, &key);
+                          "is more than 255 bytes: \"%s\"",
+                          &ctx->key.value, key.data);
             continue;
         }
 
@@ -206,6 +224,7 @@ ngx_stream_limit_conn_handler(ngx_stream_session_t *s)
         node = ngx_stream_limit_conn_lookup(&ctx->sh->rbtree, &key, hash);
 
         if (node == NULL) {
+            ngx_log_error(lccf->log_level, s->connection->log, 0, "New Connections");
 
             n = offsetof(ngx_rbtree_node_t, color)
                 + offsetof(ngx_stream_limit_conn_node_t, data)
@@ -232,16 +251,27 @@ ngx_stream_limit_conn_handler(ngx_stream_session_t *s)
 
             node->key = hash;
             lc->len = (u_char) key.len;
+	    lc->tokens = limits[i].conn;
+	    lc->refilledTime = ngx_current_msec;
+	    lc->tokens--;
             lc->conn = 1;
+	    lc->locked = 1;
             ngx_memcpy(lc->data, key.data, key.len);
 
             ngx_rbtree_insert(&ctx->sh->rbtree, node);
-
         } else {
 
             lc = (ngx_stream_limit_conn_node_t *) &node->color;
 
-            if ((ngx_uint_t) lc->conn >= limits[i].conn) {
+            ngx_log_error(lccf->log_level, s->connection->log, 0, "Creating Connections");
+	    if ((ngx_current_msec - lc->refilledTime) > 1000) {
+                lc->refilledTime = ngx_current_msec;
+	        lc->tokens = limits[i].conn;
+                ngx_log_error(lccf->log_level, s->connection->log, 0, "Refilling Connections");
+	    }
+
+            if (((ngx_uint_t) lc->conn >= limits[i].conn) || 
+	        (lc->tokens <= 0))  {
 
                 ngx_shmtx_unlock(&ctx->shpool->mutex);
 
@@ -263,11 +293,10 @@ ngx_stream_limit_conn_handler(ngx_stream_session_t *s)
                 return NGX_STREAM_SERVICE_UNAVAILABLE;
             }
 
+            ngx_log_error(lccf->log_level, s->connection->log, 0, "Reducing Connections");
+	    lc->tokens--;
             lc->conn++;
         }
-
-        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, s->connection->log, 0,
-                       "limit conn: %08Xi %d", node->key, lc->conn);
 
         ngx_shmtx_unlock(&ctx->shpool->mutex);
 
@@ -389,7 +418,8 @@ ngx_stream_limit_conn_cleanup(void *data)
 
     lc->conn--;
 
-    if (lc->conn == 0) {
+    if ((lc->conn == 0) && 
+        (!lc->locked))  {
         ngx_rbtree_delete(&ctx->sh->rbtree, node);
         ngx_slab_free_locked(ctx->shpool, node);
     }
@@ -536,6 +566,72 @@ ngx_stream_limit_conn_merge_conf(ngx_conf_t *cf, void *parent, void *child)
     return NGX_CONF_OK;
 }
 
+
+static char *
+ngx_stream_limit_conn_gtpc(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_stream_limit_conn_conf_t   *lccf = conf;
+    ngx_int_t    gtpcType, gtpcLimit;
+    ngx_str_t    *value;
+    ngx_stream_limit_conn_limit_t  *limit, *limits;
+    ngx_shm_zone_t                 *shm_zone;
+
+    value = cf->args->elts;
+
+    /* Replicated from limit conn */
+    shm_zone = ngx_shared_memory_add(cf, &value[1], 0,
+                                     &ngx_stream_limit_conn_module);
+    if (shm_zone == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    limits = lccf->limits.elts;
+
+    if (limits == NULL) {
+        if (ngx_array_init(&lccf->limits, cf->pool, 1,
+                           sizeof(ngx_stream_limit_conn_limit_t))
+            != NGX_OK)
+        {
+            return NGX_CONF_ERROR;
+        }
+    }
+    /* Replicated from limit conn */
+
+    gtpcType = ngx_atoi(value[2].data, value[2].len);
+
+    if (gtpcType <= 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "Invalid GTPC Type should be <= 255 \"%V\"", &value[1]);
+        return NGX_CONF_ERROR;
+    }
+
+    gtpcLimit = ngx_atoi(value[3].data, value[3].len);
+
+    if (gtpcLimit <= 0) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "Invalid GTPC Conn Limit \"%V\"", &value[2]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (gtpcLimit > 65535) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                           "connection limit must be less 65536");
+        return NGX_CONF_ERROR;
+    }
+
+    /* Replicate from Limit Conn */
+    limit = ngx_array_push(&lccf->limits);
+    if (limit == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    limit->conn = gtpcLimit;
+    limit->gtpcProto = gtpcType;
+    limit->shm_zone = shm_zone;
+    /* Replicate from Limit Conn */
+
+    return NGX_CONF_OK;
+}
 
 static char *
 ngx_stream_limit_conn_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)

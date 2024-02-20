@@ -15,6 +15,8 @@ static ngx_stream_variable_t *ngx_stream_add_prefix_variable(ngx_conf_t *cf,
 
 static ngx_int_t ngx_stream_variable_binary_remote_addr(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_stream_variable_gtpc(ngx_stream_session_t *s,
+    ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_variable_remote_addr(ngx_stream_session_t *s,
     ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_variable_remote_port(ngx_stream_session_t *s,
@@ -59,6 +61,9 @@ static ngx_stream_variable_t  ngx_stream_core_variables[] = {
 
     { ngx_string("remote_addr"), NULL,
       ngx_stream_variable_remote_addr, 0, 0, 0 },
+
+    { ngx_string("gtpc"), NULL,
+      ngx_stream_variable_gtpc, 0, 0, 0 },
 
     { ngx_string("remote_port"), NULL,
       ngx_stream_variable_remote_port, 0, 0, 0 },
@@ -522,6 +527,18 @@ ngx_stream_variable_binary_remote_addr(ngx_stream_session_t *s,
     return NGX_OK;
 }
 
+
+static ngx_int_t ngx_stream_variable_gtpc(ngx_stream_session_t *s,
+    ngx_stream_variable_value_t *v, uintptr_t data)
+{
+    v->len = s->connection->gtpcProtoS.len;
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->data = (u_char *)s->connection->gtpcProtoS.data;
+
+    return NGX_OK;
+}
 
 static ngx_int_t
 ngx_stream_variable_remote_addr(ngx_stream_session_t *s,
